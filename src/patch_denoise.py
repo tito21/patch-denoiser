@@ -73,7 +73,7 @@ def wavelet_denoise(x: NDArray, wavelet="bior1.3", threshold=0.1):
         rec = waverecn(array_to_coeffs(coeffs_arr, coeffs_slices), wavelet)
     return rec
 
-@njit
+@njit(fastmath=True)
 def hard_thresholding(signal: ArrayLike, threshold: float) -> NDArray:
     """
     Apply hard thresholding to a signal.
@@ -95,7 +95,7 @@ def hard_thresholding(signal: ArrayLike, threshold: float) -> NDArray:
     return np.where(np.abs(signal) < threshold, 0, signal)
 
 
-@njit(complex128[:, :, :](complex128[:, :, :], float64))
+@njit(complex128[:, :, :](complex128[:, :, :], float64), fastmath=True)
 def low_pass_filter3d(signal: NDArray, sigma: float) -> NDArray:
     """
     Apply a low-pass filter to the input array.
@@ -120,7 +120,7 @@ def low_pass_filter3d(signal: NDArray, sigma: float) -> NDArray:
     return f_shifted * signal
 
 
-@njit
+@njit(fastmath=True)
 def truncated_svd(A, rank, over_sample=10, power_iteration=1):
     """Compute the truncated SVD of a matrix A using randomized SVD.
     The algorithm is based on the scikit-learn implementation.
@@ -243,7 +243,7 @@ def multi_mode_dot_transpose(tensor, factors, skip=-1):
     return tensor
 
 
-@njit
+@njit(fastmath=True)
 def mode_dot(tensor, m, mode):
     new_shape = list(tensor.shape)
     new_shape[mode] = m.shape[0]
@@ -259,7 +259,7 @@ def tucker_to_tensor(core, factors):
     return tensor
 
 
-@njit
+@njit(fastmath=True)
 def tucker(tensor: ArrayLike, full_svd=True, rank=np.array([25, 25, 25])) -> tuple[NDArray, list[NDArray]]:
     """
     Tucker decomposition of a 3D tensor.
@@ -273,17 +273,24 @@ def tucker(tensor: ArrayLike, full_svd=True, rank=np.array([25, 25, 25])) -> tup
         core: core tensor
         factor: list factor matrices.
     """
-    factors = []
-    if tensor.size > 100:
-        full_svd = False
+    # if tensor.size > 100:
+    #     full_svd = False
+    if full_svd:
+        factors = [np.empty((tensor.shape[i], tensor.shape[i]), dtype=tensor.dtype) for i in range(3)]
+    else:
+        factors = [np.empty((tensor.shape[i], rank[i]), dtype=tensor.dtype) for i in range(3)]
+    # factors = []
+
     for i in range(3):
         # U, _, _ = truncated_svd(unfold(tensor, i), rank=rank[i])
         if full_svd:
             U, _, _ = np.linalg.svd(unfold(tensor, i), full_matrices=False)
+            factors[i] = np.ascontiguousarray(U)
         else:
             U, _, _ = truncated_svd(unfold(tensor, i), rank=rank[i])
-
-        factors.append(U)
+            factors[i] = np.ascontiguousarray(U)
+        # print("U", U.shape, U.dtype)
+        # factors.append(U)
 
     core = multi_mode_dot_transpose(tensor, factors)
     return core, factors
@@ -308,18 +315,18 @@ def compress_tucker(tensor: ArrayLike, threshold: float) -> tuple[NDArray, int]:
         N: The number of non-zero elements in the compressed core tensor.
     """
     rank = np.array([tensor.shape[0] // 2, tensor.shape[1] // 2, tensor.shape[2] // 2])
-    core, factors = tucker(tensor, rank=rank)
+    core, factors = tucker(tensor, rank=rank, full_svd=False)
     core = hard_thresholding(core, threshold)
     N = np.sum(core != 0)
     return tucker_to_tensor(core, factors), N
 
 
-@njit(nogil=True)
+@njit(nogil=True, fastmath=True)
 def weighted_dist(x, y, w):
     return np.sum(w * (x - y) ** 2)
 
 
-@njit(nogil=True)
+@njit(nogil=True, fastmath=True)
 def search_windows_llr_hd(
     local_patch: NDArray,
     padded_image: NDArray,
@@ -363,7 +370,7 @@ def search_windows_llr_hd(
         ),
         dtype=local_patch.dtype,
     )
-    indices = np.empty(((i_end - i_start) * (j_end - j_start), 2), dtype=np.int32)
+    indices = np.empty(((i_end - i_start) * (j_end - j_start), 2), dtype=np.uint16)
 
     if patch_transform == "fft":
         # print("Using FFT")
