@@ -1,4 +1,4 @@
-from numba import njit, objmode, float64, complex128, prange
+from numba import njit, objmode, float32, complex64, prange
 from numba_progress import ProgressBar
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -39,14 +39,14 @@ def ifft2(x):
     return ifft(ifft(x, axis=0), axis=1)
 
 
-@njit(complex128[:, :, :](complex128[:, :, :]))
+@njit(complex64[:, :, :](complex64[:, :, :]))
 def fft3(
     x: np.ndarray[tuple[int, int, int], complex | float],
 ) -> np.ndarray[tuple[int, int, int], complex]:
     return fftn(x, axes=(0, 1, 2))
 
 
-@njit(complex128[:, :, :](complex128[:, :, :]))
+@njit(complex64[:, :, :](complex64[:, :, :]))
 def ifft3(
     x: np.ndarray[tuple[int, int, int], complex],
 ) -> np.ndarray[tuple[int, int, int], complex]:
@@ -66,12 +66,13 @@ def wavelet_denoise(x: NDArray, wavelet="bior1.3", threshold=0.1):
     Returns:
         x_denoised: The denoised array after applying the wavelet transform and thresholding.
     """
-    with objmode(rec="complex128[:, :, :]"):
+    with objmode(rec="complex64[:, :, :]"):
         coeffs = wavedecn(x, wavelet)
         coeffs_arr, coeffs_slices = coeffs_to_array(coeffs)
         coeffs_arr = hard_thresholding(coeffs_arr, threshold)
         rec = waverecn(array_to_coeffs(coeffs_arr, coeffs_slices), wavelet)
     return rec
+
 
 @njit(fastmath=True)
 def hard_thresholding(signal: ArrayLike, threshold: float) -> NDArray:
@@ -92,10 +93,10 @@ def hard_thresholding(signal: ArrayLike, threshold: float) -> NDArray:
                        threshold are set to zero.
     """
     # return np.where(signal < threshold, 0, signal)
-    return np.where(np.abs(signal) < threshold, 0, signal)
+    return np.where(np.abs(signal) < threshold, 0, signal).astype(signal.dtype)
 
 
-@njit(complex128[:, :, :](complex128[:, :, :], float64), fastmath=True)
+@njit(complex64[:, :, :](complex64[:, :, :], float32), fastmath=True)
 def low_pass_filter3d(signal: NDArray, sigma: float) -> NDArray:
     """
     Apply a low-pass filter to the input array.
@@ -115,7 +116,7 @@ def low_pass_filter3d(signal: NDArray, sigma: float) -> NDArray:
     Y -= center[1]
     Z -= center[2]
     f = np.exp(-(X**2 + Y**2 + Z**2) / (2 * sigma**2))
-    with objmode(f_shifted='float64[:, :, :]'):  # annotate return type
+    with objmode(f_shifted="float32[:, :, :]"):  # annotate return type
         f_shifted = fftshift(f)
     return f_shifted * signal
 
@@ -131,7 +132,10 @@ def truncated_svd(A, rank, over_sample=10, power_iteration=1):
         transpose = True
     if transpose:
         A = np.ascontiguousarray(np.conj(A).T)
-    P = np.random.randn(A.shape[1], rank + over_sample) + 1j * np.random.randn(A.shape[1], rank + over_sample)
+    P = (
+        np.random.randn(A.shape[1], rank + over_sample)
+        + 1j * np.random.randn(A.shape[1], rank + over_sample)
+    ).astype(A.dtype)
     Z = A @ P
     At = np.ascontiguousarray(np.conj(A.T))
     for k in range(power_iteration):
@@ -206,21 +210,21 @@ def unfold(tensor: ArrayLike, mode: int) -> NDArray:
         ValueError: If the mode is not one of {0, 1, 2}.
     """
     if mode == 0:
-        return np.ascontiguousarray(np.reshape(tensor, (tensor.shape[0], -1)))
+        return np.ascontiguousarray(np.reshape(tensor, (tensor.shape[0], -1))).astype(tensor.dtype)
     elif mode == 1:
         return np.ascontiguousarray(
             np.reshape(
                 np.ascontiguousarray(np.transpose(tensor, (1, 0, 2))),
                 (tensor.shape[1], -1),
             )
-        )
+        ).astype(tensor.dtype)
     elif mode == 2:
         return np.ascontiguousarray(
             np.reshape(
                 np.ascontiguousarray(np.transpose(tensor, (2, 0, 1))),
                 (tensor.shape[2], -1),
             )
-        )
+        ).astype(tensor.dtype)
     else:
         raise ValueError("mode should be in {0, 1, 2}")
 
@@ -260,7 +264,9 @@ def tucker_to_tensor(core, factors):
 
 
 @njit(fastmath=True)
-def tucker(tensor: ArrayLike, full_svd=True, rank=np.array([25, 25, 25])) -> tuple[NDArray, list[NDArray]]:
+def tucker(
+    tensor: ArrayLike, full_svd=True, rank=np.array([25, 25, 25])
+) -> tuple[NDArray, list[NDArray]]:
     """
     Tucker decomposition of a 3D tensor.
     Args:
@@ -276,19 +282,24 @@ def tucker(tensor: ArrayLike, full_svd=True, rank=np.array([25, 25, 25])) -> tup
     # if tensor.size > 100:
     #     full_svd = False
     if full_svd:
-        factors = [np.empty((tensor.shape[i], tensor.shape[i]), dtype=tensor.dtype) for i in range(3)]
+        factors = [
+            np.empty((tensor.shape[i], tensor.shape[i]), dtype=tensor.dtype)
+            for i in range(3)
+        ]
     else:
-        factors = [np.empty((tensor.shape[i], rank[i]), dtype=tensor.dtype) for i in range(3)]
+        factors = [
+            np.empty((tensor.shape[i], rank[i]), dtype=tensor.dtype) for i in range(3)
+        ]
     # factors = []
 
     for i in range(3):
         # U, _, _ = truncated_svd(unfold(tensor, i), rank=rank[i])
         if full_svd:
             U, _, _ = np.linalg.svd(unfold(tensor, i), full_matrices=False)
-            factors[i] = np.ascontiguousarray(U)
+            factors[i] = np.ascontiguousarray(U).astype(tensor.dtype)
         else:
             U, _, _ = truncated_svd(unfold(tensor, i), rank=rank[i])
-            factors[i] = np.ascontiguousarray(U)
+            factors[i] = np.ascontiguousarray(U).astype(tensor.dtype)
         # print("U", U.shape, U.dtype)
         # factors.append(U)
 
@@ -314,7 +325,7 @@ def compress_tucker(tensor: ArrayLike, threshold: float) -> tuple[NDArray, int]:
         compressed_tensor: The reconstructed tensor after compression.
         N: The number of non-zero elements in the compressed core tensor.
     """
-    rank = np.array([tensor.shape[0] // 2, tensor.shape[1] // 2, tensor.shape[2] // 2])
+    rank = np.array([tensor.shape[0] // 2, tensor.shape[1] // 2, tensor.shape[2] // 2], dtype=np.uint16)
     core, factors = tucker(tensor, rank=rank, full_svd=False)
     core = hard_thresholding(core, threshold)
     N = np.sum(core != 0)
@@ -376,7 +387,8 @@ def search_windows_llr_hd(
         # print("Using FFT")
         # local_patch = hard_thresholding(wavelet_transform(local_patch)[1], lambda2d)
         local_patch_transformed = (
-            low_pass_filter3d(fft3(local_patch), lambda2d) / window_size**2
+            low_pass_filter3d(fft3(local_patch), lambda2d)
+            / window_size**2
             # hard_thresholding(fft3(local_patch), lambda2d) / window_size**2
         )
         # print("local_patch", local_patch.shape, local_patch.dtype)
@@ -392,7 +404,8 @@ def search_windows_llr_hd(
             if patch_transform == "fft":
                 # patch = hard_thresholding(wavelet_transform(patch)[1], lambda2d)
                 patch_transformed = (
-                    low_pass_filter3d(fft3(patch), lambda2d) / window_size**2
+                    low_pass_filter3d(fft3(patch), lambda2d)
+                    / window_size**2
                     # hard_thresholding(fft3(patch), lambda2d) / window_size**2
                 )
             elif patch_transform == "wavelet":
@@ -459,8 +472,8 @@ def _main_loop_llr_tucker(
     total = n_row * n_col
     for t in prange(total):
 
-    # for row in range(0, n_row):
-    #     for col in range(0, n_col):
+        # for row in range(0, n_row):
+        #     for col in range(0, n_col):
         row = t // n_col
         col = t % n_col
         i_start = row - min(search_window, row)
@@ -545,13 +558,13 @@ def locally_low_rank_tucker(
             (0, 0),
         ),
         "reflect",
-    ).astype(complex)
+    ).astype(np.complex64)
 
     n_row, n_col = noisy_image.shape[0], noisy_image.shape[1]
     with ProgressBar(total=n_row * n_col) as progress_bar:
         denoised_image = _main_loop_llr_tucker(
             progress_bar,
-            noisy_image,
+            noisy_image.astype(np.complex64),
             padded_image,
             window_size,
             patch_transform,
@@ -627,7 +640,7 @@ def _wiener_main_loop(
     search_window,
 ):
     numerator = np.zeros_like(padded_noisy)
-    denominator = np.zeros(padded_noisy.shape, dtype=np.float64)
+    denominator = np.zeros(padded_noisy.shape, dtype=np.float32)
 
     n_row, n_col, n_channels = (
         noisy_image.shape[0],
