@@ -1,7 +1,7 @@
 import numpy as np
 
-from tests.phantom import phantom_multicontrast
-from patch_denoise import locally_low_rank_tucker
+from phantom import phantom_multicontrast
+from denoise.patch_denoise import locally_low_rank_tucker
 
 data = phantom_multicontrast(32)
 noise_level = 0.1

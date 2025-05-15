@@ -29,6 +29,8 @@ dependencies = [
     "numba-progress",
     "PyWavelets",
     "ipywidgets",
+    "bm4d",
+    "bm3d"
 ]
 
 # [project.urls]

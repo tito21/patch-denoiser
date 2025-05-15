@@ -6,8 +6,9 @@ import timeit
 import matplotlib.pyplot as plt
 import numpy as np
 
-from tests.phantom import phantom_multicontrast
-from patch_denoise import locally_low_rank_tucker, tucker, tucker_to_tensor
+from phantom import phantom_multicontrast
+from denoise.patch_denoise import locally_low_rank_tucker, tucker, tucker_to_tensor
+
 def plot_images(images, titles):
     fig, axes = plt.subplots(1, len(images), figsize=(15, 15))
     for ax, img, title in zip(axes, images, titles):
@@ -49,12 +50,12 @@ print("Core shape", core.shape)
 # print(core)
 print("Factor shapes", [f.shape for f in factors])
 
-fig, axs = plt.subplots(1, len(core), figsize=(15, 5))
-for i, ax in enumerate(axs):
-    ax.imshow(np.abs(core[i, :, :]), cmap='gray')
-    ax.set_title(f"Core slice {i}")
-    ax.axis('off')
-plt.show()
+# fig, axs = plt.subplots(1, len(core), figsize=(15, 5))
+# for i, ax in enumerate(axs):
+#     ax.imshow(np.abs(core[i, :, :]), cmap='gray')
+#     ax.set_title(f"Core slice {i}")
+#     ax.axis('off')
+# plt.show()
 
 # print("Old", timeit.timeit(
 #     "tucker_to_tensor(core, factors)",
