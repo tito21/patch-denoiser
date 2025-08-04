@@ -21,12 +21,14 @@ license-files = ["LICEN[CS]E*"]
 
 
 dependencies = [
+    "torch",
     "numpy",
     "scipy",
     "numba",
     "rocket-fft",
     "tqdm",
     "numba-progress",
+    "scikit-learn",
     "PyWavelets",
     "ipywidgets",
     "bm4d",

@@ -53,8 +53,22 @@ def ifft3(
     return ifftn(x, axes=(0, 1, 2))
 
 
+@njit(complex64[:, :, :, :](complex64[:, :, :, :]))
+def fft4(
+    x: np.ndarray[tuple[int, int, int, int], complex | float],
+) -> np.ndarray[tuple[int, int, int, int], complex]:
+    return fftn(x, axes=(0, 1, 2, 3))
+
+
+@njit(complex64[:, :, :, :](complex64[:, :, :, :]))
+def ifft4(
+    x: np.ndarray[tuple[int, int, int, int], complex],
+) -> np.ndarray[tuple[int, int, int, int], complex]:
+    return ifftn(x, axes=(0, 1, 2, 3))
+
+
 @njit
-def wavelet_denoise(x: NDArray, wavelet="bior1.3", threshold=0.1):
+def wavelet_denoise(x: NDArray, wavelet="bior1.3", threshold=0.1, axis=(0, 1)):
     """
     Perform wavelet denoising on the input array using the specified wavelet and threshold.
 
@@ -66,12 +80,12 @@ def wavelet_denoise(x: NDArray, wavelet="bior1.3", threshold=0.1):
     Returns:
         x_denoised: The denoised array after applying the wavelet transform and thresholding.
     """
-    with objmode(rec="complex64[:, :, :]"):
-        coeffs = wavedecn(x, wavelet)
-        coeffs_arr, coeffs_slices = coeffs_to_array(coeffs)
+    with objmode(rec="complex64[:, :, :, :]"):
+        coeffs = wavedecn(x, wavelet, axes=axis)
+        coeffs_arr, coeffs_slices = coeffs_to_array(coeffs, axes=axis)
         # print("coeffs_arr max", np.abs(coeffs_arr).max(), "coeffs_arr min", np.abs(coeffs_arr).min(), "coeffs_arr mean", np.abs(coeffs_arr).mean(), "coeffs_arr std", np.abs(coeffs_arr).std())
         coeffs_arr = hard_thresholding(coeffs_arr, threshold)
-        rec = waverecn(array_to_coeffs(coeffs_arr, coeffs_slices), wavelet)
+        rec = waverecn(array_to_coeffs(coeffs_arr, coeffs_slices), wavelet, axes=axis)
     return rec
 
 
@@ -118,6 +132,33 @@ def low_pass_filter3d(signal: NDArray, sigma: float) -> NDArray:
     Z -= center[2]
     f = np.exp(-(X**2 + Y**2 + Z**2) / (2 * sigma**2)).astype(signal.dtype)
     with objmode(f_shifted="complex64[:, :, :]"):  # annotate return type
+        f_shifted = fftshift(f)
+    return f_shifted * signal
+
+
+@njit(complex64[:, :, :, :](complex64[:, :, :, :], float32), fastmath=True)
+def low_pass_filter4d(signal: NDArray, sigma: float) -> NDArray:
+    """
+    Apply a low-pass filter to the input array.
+
+    Args:
+        X: Input array to be filtered.
+        sigma: Standard deviation of the Gaussian filter.
+
+    Returns:
+        out: The filtered array.
+    """
+    X = np.arange(signal.shape[0])[:, np.newaxis, np.newaxis, np.newaxis]
+    Y = np.arange(signal.shape[1])[np.newaxis, :, np.newaxis, np.newaxis]
+    Z = np.arange(signal.shape[2])[np.newaxis, np.newaxis, :, np.newaxis]
+    W = np.arange(signal.shape[3])[np.newaxis, np.newaxis, np.newaxis, :]
+    center = (signal.shape[0] // 2, signal.shape[1] // 2, signal.shape[2] // 2, signal.shape[3] // 2)
+    X -= center[0]
+    Y -= center[1]
+    Z -= center[2]
+    W -= center[3]
+    f = np.exp(-(X**2 + Y**2 + Z**2 + W**2) / (2 * sigma**2)).astype(signal.dtype)
+    with objmode(f_shifted="complex64[:, :, :, :]"):  # annotate return type
         f_shifted = fftshift(f)
     return f_shifted * signal
 
@@ -326,10 +367,13 @@ def compress_wavelet(tensor: ArrayLike, threshold: float) -> NDArray:
     Returns:
         compressed_tensor: The reconstructed tensor after compression.
     """
-    coeffs = wavedecn(tensor, "bior1.3")
-    coeffs_arr, coeffs_slices = coeffs_to_array(coeffs)
-    coeffs_arr = hard_thresholding(coeffs_arr, threshold)
-    return waverecn(array_to_coeffs(coeffs_arr, coeffs_slices), "bior1.3")
+    with objmode(coeffs="complex64[:, :, :]"):
+        coeffs = wavedecn(tensor, "bior1.3")
+        coeffs_arr, coeffs_slices = coeffs_to_array(coeffs)
+        coeffs_arr = hard_thresholding(coeffs_arr, threshold)
+        rec = waverecn(array_to_coeffs(coeffs_arr, coeffs_slices), "bior1.3")
+        N = np.sum(coeffs_arr != 0)
+    return rec, N
 
 
 @njit
@@ -367,6 +411,8 @@ def search_windows_llr_hd(
     local_patch: NDArray,
     padded_image: NDArray,
     window_size: int,
+    k_start: int,
+    k_end: int,
     i_start: int,
     i_end: int,
     j_start: int,
@@ -399,66 +445,65 @@ def search_windows_llr_hd(
 
     patches = np.empty(
         (
-            (i_end - i_start) * (j_end - j_start),
+            (k_end - k_start) * (i_end - i_start) * (j_end - j_start),
             local_patch.shape[0],
             local_patch.shape[1],
             local_patch.shape[2],
+            local_patch.shape[3],
         ),
         dtype=local_patch.dtype,
     )
-    indices = np.empty(((i_end - i_start) * (j_end - j_start), 2), dtype=np.uint16)
+    indices = np.empty(((k_end - k_start) * (i_end - i_start) * (j_end - j_start), 3), dtype=np.uint16)
 
     if patch_transform == "fft":
         # print("Using FFT")
         # local_patch = hard_thresholding(wavelet_transform(local_patch)[1], lambda2d)
         local_patch_transformed = (
-            low_pass_filter3d(fft3(local_patch), lambda2d)
-            / window_size**2
+            low_pass_filter4d(fft4(local_patch), lambda2d)
+            / window_size**3
             # hard_thresholding(fft3(local_patch), lambda2d) / window_size**2
         )
         # print("local_patch", local_patch.shape, local_patch.dtype)
     elif patch_transform == "wavelet":
-        local_patch_transformed = wavelet_denoise(local_patch, threshold=lambda2d)
+        local_patch_transformed = wavelet_denoise(local_patch, threshold=lambda2d, axis=(0, 1, 2))
     else:
         local_patch_transformed = local_patch
 
-    # patches[0, :, :, :] = local_patch
-    # indices[0, 0] = (i_end - i_start) // 2
-    # indices[0, 1] = (j_end - j_start) // 2
     ii = 0
-    dist_list = np.zeros((i_end - i_start) * (j_end - j_start), dtype=np.float32)
-    for i in range(i_start, i_end):
-        for j in range(j_start, j_end):
-            if True or not (i == ((i_end - i_start) // 2) and j == ((j_end - j_start) // 2)):
-                patch = padded_image[i : i + window_size, j : j + window_size, :]
+    dist_list = np.zeros((k_end - k_start) * (i_end - i_start) * (j_end - j_start), dtype=np.float32)
+    for k in range(k_start, k_end):
+        for i in range(i_start, i_end):
+            for j in range(j_start, j_end):
+                patch = padded_image[k : k + window_size, i : i + window_size, j : j + window_size, :]
                 if patch_transform == "fft":
                     # patch = hard_thresholding(wavelet_transform(patch)[1], lambda2d)
                     patch_transformed = (
-                        low_pass_filter3d(fft3(patch), lambda2d)
-                        / window_size**2
+                        low_pass_filter4d(fft4(patch), lambda2d)
+                        / window_size**3
                         # hard_thresholding(fft3(patch), lambda2d) / window_size**2
                     )
                 elif patch_transform == "wavelet":
-                    patch_transformed = wavelet_denoise(patch, threshold=lambda2d)
+                    patch_transformed = wavelet_denoise(patch, threshold=lambda2d, axis=(0, 1, 2))
                 else:
                     patch_transformed = patch
                 # print("patch", patch_transformed.shape, patch_transformed.dtype, "local_patch", local_patch_transformed.shape, local_patch_transformed.dtype)
                 dist = (
                     np.sum(np.abs(local_patch_transformed - patch_transformed) ** 2)
-                ) / window_size**2
+                ) / window_size**3
 
                 dist_list[ii] = dist
                 # if dist < 0.01:
                 #     print("Distance", dist)
 
                 if dist < tau:
-                    patches[ii, :, :, :] = patch
-                    indices[ii, 0] = i
-                    indices[ii, 1] = j
+                    patches[ii, :, :, :, :] = patch
+                    indices[ii, 0] = k
+                    indices[ii, 1] = i
+                    indices[ii, 2] = j
                     ii += 1
     # print("Number of patches found", ii, "/", patches.shape[0], patches[:ii, :, :, :].shape)
     # print("Distance list mean, std", np.mean(dist_list[:ii]), np.std(dist_list[:ii]))
-    return np.ascontiguousarray(patches[:ii, :, :, :]), indices[:ii, :]
+    return np.ascontiguousarray(patches[:ii, :, :, :, :]), indices[:ii, :]
 
 
 @njit(parallel=True, nogil=True)
@@ -496,31 +541,43 @@ def _main_loop_llr_tucker(
         denoised: The denoised image, cropped to remove padding.
     """
 
-    n_row, n_col, n_channels = (
+    n_slices, n_row, n_col, n_channels = (
         noisy_image.shape[0],
         noisy_image.shape[1],
         noisy_image.shape[2],
+        noisy_image.shape[3],
     )
 
     numerator = np.zeros_like(padded_image)
     denominator = np.zeros_like(padded_image)
-    total = n_row * n_col
+    total = n_slices * n_row * n_col
     for t in prange(total):
 
-        # for row in range(0, n_row):
-        #     for col in range(0, n_col):
-        row, col = divmod(t, n_col)
+        slice_index = t // (n_row * n_col)
+        row = (t // n_col) % n_row
+        col = t % n_col
+        slice_index = int(slice_index)
         row = int(row)
         col = int(col)
+
+        k_start = slice_index - min(search_window, slice_index)
+        k_end = slice_index + min(search_window + 1, n_slices - slice_index)
         i_start = row - min(search_window, row)
         i_end = row + min(search_window + 1, n_row - row)
         j_start = col - min(search_window, col)
         j_end = col + min(search_window + 1, n_col - col)
-        local_patch = padded_image[row : row + window_size, col : col + window_size]
+        local_patch = padded_image[
+            slice_index : slice_index + window_size,
+            row : row + window_size,
+            col : col + window_size,
+            :,
+        ]
         patches, indicies = search_windows_llr_hd(
             local_patch,
             padded_image,
             window_size,
+            k_start,
+            k_end,
             i_start,
             i_end,
             j_start,
@@ -531,19 +588,19 @@ def _main_loop_llr_tucker(
         )
         # print("patches", patches.shape, patches.dtype)
         # Higher order SVD
-        patches = np.ascontiguousarray(np.transpose(patches, (1, 2, 0, 3)))
-        patches = patches.reshape(window_size * window_size, indicies.shape[0], n_channels)
+        patches = np.ascontiguousarray(np.transpose(patches, (1, 2, 3, 0, 4)))
+        patches = patches.reshape(window_size * window_size * window_size, indicies.shape[0], n_channels)
         patches_rec, N = compress_tucker(
             patches,
             threshold,
         )
-        patches_rec = np.ascontiguousarray(patches_rec.reshape(window_size, window_size, indicies.shape[0], n_channels))
-        patches_rec = np.ascontiguousarray(np.transpose(patches_rec, (2, 0, 1, 3)))
+        patches_rec = np.ascontiguousarray(patches_rec.reshape(window_size, window_size, window_size, indicies.shape[0], n_channels))
+        patches_rec = np.ascontiguousarray(np.transpose(patches_rec, (3, 0, 1, 2, 4)))
         weights = 1 / (1 + N)
         patches = patches_rec * weights
-        for (ii, jj), patch in zip(indicies, patches):
-            numerator[ii : ii + window_size, jj : jj + window_size] += patch
-            denominator[ii : ii + window_size, jj : jj + window_size] += weights
+        for (kk, ii, jj), patch in zip(indicies, patches):
+            numerator[kk : kk + window_size, ii : ii + window_size, jj : jj + window_size] += patch
+            denominator[kk : kk + window_size, ii : ii + window_size, jj : jj + window_size] += weights
 
         progress_bar.update(1)
 
@@ -551,6 +608,8 @@ def _main_loop_llr_tucker(
     return denoised[
         window_size // 2 + 1 : -window_size // 2,
         window_size // 2 + 1 : -window_size // 2,
+        window_size // 2 + 1 : -window_size // 2,
+        :,
     ]
 
 
@@ -585,9 +644,20 @@ def locally_low_rank_tucker(
         - The `_main_loop_llr_tucker` function is used internally to perform the core denoising operation.
 
     """
+
+    if window_size % 2 == 0:
+        window_size += 1  # Ensure window size is odd
+    if search_window % 2 == 0:
+        search_window += 1  # Ensure search window is odd
+
+    original_shape = noisy_image.shape
+    noisy_image = np.asarray(noisy_image)
+    if noisy_image.ndim == 3:
+        noisy_image = np.expand_dims(noisy_image, axis=0)
     padded_image = np.pad(
-        np.asarray(noisy_image),
+        noisy_image,
         (
+            (window_size // 2 + 1, window_size // 2 + 1),
             (window_size // 2 + 1, window_size // 2 + 1),
             (window_size // 2 + 1, window_size // 2 + 1),
             (0, 0),
@@ -595,8 +665,8 @@ def locally_low_rank_tucker(
         "reflect",
     ).astype(np.complex64)
 
-    n_row, n_col = noisy_image.shape[0], noisy_image.shape[1]
-    with ProgressBar(total=n_row * n_col) as progress_bar:
+    n_slices, n_row, n_col = noisy_image.shape[0], noisy_image.shape[1], noisy_image.shape[2]
+    with ProgressBar(total=n_slices * n_row * n_col) as progress_bar:
         denoised_image = _main_loop_llr_tucker(
             progress_bar,
             noisy_image.astype(np.complex64),
@@ -610,8 +680,8 @@ def locally_low_rank_tucker(
         )
     if not np.iscomplexobj(noisy_image):
         denoised_image = denoised_image.real
-    return denoised_image
 
+    return denoised_image.reshape(original_shape)
 
 @njit
 def select_patches(row, col, signal, patch, search_window=25, tau=0.005):
